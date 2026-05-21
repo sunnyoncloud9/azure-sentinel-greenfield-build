@@ -1,0 +1,142 @@
+// =============================================================================
+// Threat Hunting Queries
+// Author: Sunny Bhardwaj
+// =============================================================================
+// Hypothesis-driven hunting queries for proactive threat discovery.
+// These are designed for analyst-led investigations, not automated alerting.
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// HUNT 1: Lateral Movement via Pass-the-Hash / Pass-the-Ticket
+// MITRE: T1550 - Use Alternate Authentication Material
+// -----------------------------------------------------------------------------
+// Hypothesis: An attacker who has obtained credentials will use them to
+// access multiple machines in rapid succession.
+
+SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID in (4624, 4648)
+| where LogonType in (3, 9, 10)  // Network, NewCredentials, RemoteInteractive
+| where SubjectUserName !endswith "$"  // Exclude machine accounts
+| where AccountType == "User"
+| summarize
+    TargetHosts = make_set(Computer, 50),
+    HopCount = dcount(Computer),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    SourceIPs = make_set(IpAddress, 20)
+    by SubjectUserName, bin(TimeGenerated, 1h)
+| where HopCount >= 3
+| extend
+    DurationMinutes = datetime_diff('minute', LastSeen, FirstSeen),
+    HuntHypothesis = "Single account accessing multiple hosts in short timeframe",
+    InvestigationSteps = "1. Verify user activity 2. Check for kerberoasting 3. Review password change history"
+| order by HopCount desc
+
+
+// -----------------------------------------------------------------------------
+// HUNT 2: DNS Exfiltration / Tunneling
+// MITRE: T1048 - Exfiltration Over Alternative Protocol
+// -----------------------------------------------------------------------------
+// Hypothesis: Data exfiltration via DNS will produce unusually long
+// subdomain queries or high query volume to a single domain.
+
+DnsEvents
+| where TimeGenerated > ago(1h)
+| where SubType == "LookupQuery"
+| extend
+    DomainLength = strlen(Name),
+    SubdomainDepth = countof(Name, ".")
+| summarize
+    QueryCount = count(),
+    UniqueSubdomains = dcount(Name),
+    AvgDomainLength = avg(DomainLength),
+    MaxDomainLength = max(DomainLength),
+    SampleQueries = make_set(Name, 5)
+    by ClientIP, bin(TimeGenerated, 10m)
+| where UniqueSubdomains > 50 or MaxDomainLength > 100 or AvgDomainLength > 50
+| extend
+    HuntHypothesis = "Potential DNS tunneling or exfiltration",
+    InvestigationSteps = "1. Inspect sample queries 2. Check for encoded content 3. Verify destination domain reputation"
+| order by UniqueSubdomains desc
+
+
+// -----------------------------------------------------------------------------
+// HUNT 3: Suspicious OAuth Application Consent Grants
+// MITRE: T1528 - Steal Application Access Token
+// -----------------------------------------------------------------------------
+// Hypothesis: Attackers create or trick users into consenting to malicious
+// OAuth apps to gain persistent access without needing passwords.
+
+AuditLogs
+| where TimeGenerated > ago(7d)
+| where OperationName in ("Consent to application", "Add app role assignment grant to user")
+| where Result == "success"
+| extend
+    AppDisplayName = tostring(TargetResources[0].displayName),
+    ConsentedUser = tostring(InitiatedBy.user.userPrincipalName),
+    Permissions = tostring(TargetResources[0].modifiedProperties[0].newValue)
+| extend
+    HighRiskPermissions = iff(
+        Permissions has_any ("Mail.Read", "Mail.ReadWrite", "Files.Read.All", "Files.ReadWrite.All",
+                              "User.Read.All", "Directory.Read.All", "offline_access"),
+        true, false
+    )
+| where HighRiskPermissions == true
+| extend
+    HuntHypothesis = "Potentially malicious OAuth consent — illicit consent grant attack",
+    InvestigationSteps = "1. Verify app legitimacy 2. Check publisher 3. Review granted permissions 4. Revoke if suspicious"
+| project TimeGenerated, ConsentedUser, AppDisplayName, Permissions, HuntHypothesis, InvestigationSteps
+| order by TimeGenerated desc
+
+
+// -----------------------------------------------------------------------------
+// HUNT 4: Unusual Process Tree (Office Spawning Suspicious Children)
+// MITRE: T1566.001 - Spearphishing Attachment
+// -----------------------------------------------------------------------------
+// Hypothesis: Malicious macros in Office documents spawn suspicious child
+// processes like PowerShell, cmd, or wscript.
+
+SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID == 4688
+| where ParentProcessName has_any ("winword.exe", "excel.exe", "powerpnt.exe", "outlook.exe")
+| where NewProcessName has_any (
+    "powershell.exe", "cmd.exe", "wscript.exe", "cscript.exe",
+    "mshta.exe", "rundll32.exe", "regsvr32.exe", "certutil.exe"
+)
+| project
+    TimeGenerated,
+    Computer,
+    Account,
+    ParentProcessName,
+    ChildProcess = NewProcessName,
+    CommandLine,
+    HuntHypothesis = "Office application spawning script/shell — possible macro-based malware",
+    InvestigationSteps = "1. Identify originating document 2. Check email/download source 3. Sandbox the document"
+| order by TimeGenerated desc
+
+
+// -----------------------------------------------------------------------------
+// HUNT 5: Mass Download / Data Staging
+// MITRE: T1074 - Data Staged
+// -----------------------------------------------------------------------------
+// Hypothesis: Before exfiltration, attackers stage data by mass-downloading
+// from internal file shares, SharePoint, or cloud storage.
+
+OfficeActivity
+| where TimeGenerated > ago(24h)
+| where Operation in ("FileDownloaded", "FileSyncDownloadedFull", "FileAccessed")
+| summarize
+    DownloadCount = count(),
+    UniqueFiles = dcount(OfficeObjectId),
+    TotalSizeMB = sum(todouble(ClientIP)) / 1024.0 / 1024.0,
+    SampleFiles = make_set(OfficeObjectId, 10),
+    SourceIPs = make_set(ClientIP, 5)
+    by UserId, bin(TimeGenerated, 1h)
+| where DownloadCount > 100 or UniqueFiles > 50
+| extend
+    HuntHypothesis = "Unusual mass download — potential data staging for exfiltration",
+    InvestigationSteps = "1. Verify legitimate business purpose 2. Check for parallel external uploads 3. Review file sensitivity"
+| order by DownloadCount desc

@@ -1,0 +1,66 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "# 🛡️ MITRE ATT&CK Detection Coverage Dashboard\n\nAuthor: **Sunny Bhardwaj**  \nLast Updated: 2026\n\nThis workbook visualizes which MITRE ATT&CK tactics and techniques are covered by our active detection rules. Use this to identify coverage gaps and prioritize new detection development.\n\n---"
+      }
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 📊 Detection Coverage by Tactic"
+      }
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let detectionRules = datatable(RuleName:string, Tactic:string, Technique:string, Severity:string)\n[\n    \"Brute Force Authentication\", \"Credential Access\", \"T1110.001\", \"High\",\n    \"Impossible Travel\", \"Initial Access\", \"T1078.004\", \"High\",\n    \"Suspicious PowerShell\", \"Execution\", \"T1059.001\", \"High\",\n    \"Privilege Escalation\", \"Privilege Escalation\", \"T1098.003\", \"Critical\",\n    \"Anomalous Sign-In\", \"Initial Access\", \"T1078.004\", \"Medium\"\n];\ndetectionRules\n| summarize DetectionCount = count() by Tactic\n| order by DetectionCount desc",
+        "size": 1,
+        "title": "Detections per MITRE Tactic",
+        "visualization": "barchart"
+      }
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 🎯 Active Detection Rules"
+      }
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let detectionRules = datatable(RuleName:string, Tactic:string, Technique:string, Severity:string, LastTriggered:datetime)\n[\n    \"Brute Force Authentication\", \"Credential Access\", \"T1110.001 - Password Guessing\", \"High\", datetime(2026-05-19),\n    \"Impossible Travel\", \"Initial Access\", \"T1078.004 - Cloud Accounts\", \"High\", datetime(2026-05-18),\n    \"Suspicious PowerShell\", \"Execution\", \"T1059.001 - PowerShell\", \"High\", datetime(2026-05-20),\n    \"Privilege Escalation\", \"Privilege Escalation\", \"T1098.003 - Additional Cloud Roles\", \"Critical\", datetime(2026-05-17),\n    \"Anomalous Sign-In\", \"Initial Access\", \"T1078.004 - Cloud Accounts\", \"Medium\", datetime(2026-05-20)\n];\ndetectionRules",
+        "size": 0,
+        "title": "Detection Rule Inventory",
+        "visualization": "table"
+      }
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 🚨 Severity Distribution"
+      }
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let detectionRules = datatable(RuleName:string, Severity:string)\n[\n    \"Brute Force Authentication\", \"High\",\n    \"Impossible Travel\", \"High\",\n    \"Suspicious PowerShell\", \"High\",\n    \"Privilege Escalation\", \"Critical\",\n    \"Anomalous Sign-In\", \"Medium\"\n];\ndetectionRules\n| summarize Count = count() by Severity",
+        "size": 1,
+        "title": "Rules by Severity",
+        "visualization": "piechart"
+      }
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 📉 Coverage Gaps - Recommended Next Detections\n\nBased on MITRE ATT&CK Enterprise matrix, here are tactics with limited or no coverage:\n\n- **Defense Evasion (TA0005)** — No detections yet. Consider: log clearing (T1070), token manipulation (T1134)\n- **Discovery (TA0007)** — No detections yet. Consider: account discovery (T1087), network scanning (T1046)\n- **Lateral Movement (TA0008)** — Limited coverage. Consider: pass-the-hash (T1550), remote services (T1021)\n- **Exfiltration (TA0010)** — No detections yet. Consider: DNS tunneling (T1048), cloud storage abuse (T1567)\n- **Impact (TA0040)** — No detections yet. Consider: ransomware indicators (T1486), account access removal (T1531)"
+      }
+    }
+  ],
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}

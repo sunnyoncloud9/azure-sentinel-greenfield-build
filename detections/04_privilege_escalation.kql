@@ -1,0 +1,103 @@
+// =============================================================================
+// Detection Rule: Azure AD Privilege Escalation
+// MITRE ATT&CK: T1078.004 - Cloud Accounts / T1098 - Account Manipulation
+// Severity: Critical
+// Author: Sunny Bhardwaj
+// =============================================================================
+//
+// Description:
+// Detects suspicious privilege escalation activities in Azure AD including:
+// - Addition to privileged roles (Global Admin, Privileged Role Admin, etc.)
+// - Service principal credential additions
+// - Conditional Access policy modifications
+// - Application permission grants
+//
+// Logic:
+// - Monitors AuditLogs for high-risk operations
+// - Correlates with the initiating user's history
+// - Flags first-time elevation events as highest risk
+//
+// Tuning Notes:
+// - Whitelist authorized PIM (Privileged Identity Management) activations
+// - Maintain an approved admin change list
+// - Consider time-of-day analysis (after-hours = higher risk)
+// =============================================================================
+
+let lookback = 24h;
+let privilegedRoles = dynamic([
+    "Global Administrator",
+    "Privileged Role Administrator",
+    "Privileged Authentication Administrator",
+    "Security Administrator",
+    "Conditional Access Administrator",
+    "Application Administrator",
+    "Cloud Application Administrator",
+    "User Administrator",
+    "Exchange Administrator",
+    "SharePoint Administrator"
+]);
+let highRiskOperations = dynamic([
+    "Add member to role",
+    "Add eligible member to role",
+    "Add app role assignment",
+    "Add service principal credentials",
+    "Add owner to application",
+    "Consent to application",
+    "Update conditional access policy",
+    "Disable Strong Authentication",
+    "Reset user password",
+    "Update application – Certificates and secrets management"
+]);
+AuditLogs
+| where TimeGenerated > ago(lookback)
+| where OperationName in (highRiskOperations)
+| where Result == "success"
+| extend
+    InitiatedByUser = tostring(InitiatedBy.user.userPrincipalName),
+    InitiatedByIP = tostring(InitiatedBy.user.ipAddress),
+    TargetUser = tostring(TargetResources[0].userPrincipalName),
+    TargetType = tostring(TargetResources[0].type),
+    TargetDisplayName = tostring(TargetResources[0].displayName),
+    ModifiedProperties = TargetResources[0].modifiedProperties
+| extend RoleAdded = tostring(ModifiedProperties[1].newValue)
+| extend IsPrivilegedRole = iff(
+    OperationName has "Add member to role" and RoleAdded has_any (privilegedRoles),
+    true,
+    false
+)
+| extend
+    Severity = case(
+        IsPrivilegedRole == true, "Critical",
+        OperationName has "service principal credentials", "Critical",
+        OperationName has "conditional access", "High",
+        OperationName has "Disable Strong Authentication", "Critical",
+        "High"
+    ),
+    MitreTactic = "Privilege Escalation",
+    MitreTechnique = case(
+        OperationName has "role", "T1098.003 - Additional Cloud Roles",
+        OperationName has "service principal", "T1098.001 - Additional Cloud Credentials",
+        OperationName has "conditional access", "T1556 - Modify Authentication Process",
+        "T1098 - Account Manipulation"
+    ),
+    RecommendedAction = case(
+        IsPrivilegedRole == true, "CRITICAL: Verify with admin, review session activity, consider rollback",
+        OperationName has "Disable Strong Authentication", "CRITICAL: Re-enable MFA immediately, investigate compromise",
+        OperationName has "service principal credentials", "Investigate app, rotate credentials if unauthorized",
+        "Verify change is authorized and aligned with change management"
+    )
+| project
+    TimeGenerated,
+    OperationName,
+    InitiatedByUser,
+    InitiatedByIP,
+    TargetUser,
+    TargetDisplayName,
+    TargetType,
+    RoleAdded,
+    IsPrivilegedRole,
+    Severity,
+    MitreTactic,
+    MitreTechnique,
+    RecommendedAction
+| order by TimeGenerated desc

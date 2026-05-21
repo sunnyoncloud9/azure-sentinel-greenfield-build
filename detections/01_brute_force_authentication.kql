@@ -1,0 +1,76 @@
+// =============================================================================
+// Detection Rule: Brute Force Authentication Attempts
+// MITRE ATT&CK: T1110 - Brute Force
+// Severity: High
+// Author: Sunny Bhardwaj
+// =============================================================================
+//
+// Description:
+// Detects multiple failed authentication attempts from the same source IP
+// against a single user account within a short time window — a classic
+// indicator of password brute force or credential stuffing attacks.
+//
+// Logic:
+// - Looks for >= 10 failed sign-ins (Result type 50126, 50053, 50055)
+// - Within a 5-minute window
+// - Followed by a successful sign-in (potential breach)
+//
+// Tuning Notes:
+// - Adjust threshold based on baseline noise in your environment
+// - Whitelist known scanners and vuln assessment tools by IP
+// - Consider impossible travel correlation for higher confidence
+// =============================================================================
+
+let timeRange = 1h;
+let failedThreshold = 10;
+let timeWindow = 5m;
+// Failed sign-in events
+let FailedSignIns =
+    SigninLogs
+    | where TimeGenerated > ago(timeRange)
+    | where ResultType in ("50126", "50053", "50055", "50056", "50064")
+    | summarize
+        FailedCount = count(),
+        FailedIPs = make_set(IPAddress, 100),
+        FirstFailure = min(TimeGenerated),
+        LastFailure = max(TimeGenerated),
+        UserAgents = make_set(UserAgent, 10)
+        by UserPrincipalName, bin(TimeGenerated, timeWindow)
+    | where FailedCount >= failedThreshold;
+// Successful sign-ins following failures (potential compromise)
+let SuccessfulAfterFailures =
+    SigninLogs
+    | where TimeGenerated > ago(timeRange)
+    | where ResultType == "0"
+    | project
+        SuccessTime = TimeGenerated,
+        UserPrincipalName,
+        SuccessIP = IPAddress,
+        SuccessLocation = strcat(LocationDetails.city, ", ", LocationDetails.countryOrRegion);
+// Correlate failures with subsequent success
+FailedSignIns
+| join kind=leftouter (SuccessfulAfterFailures) on UserPrincipalName
+| where SuccessTime between (LastFailure .. (LastFailure + 10m)) or isempty(SuccessTime)
+| extend
+    BreachIndicator = iff(isnotempty(SuccessTime), "POTENTIAL_COMPROMISE", "FAILED_ATTEMPTS_ONLY"),
+    Severity = iff(isnotempty(SuccessTime), "Critical", "High"),
+    MitreTactic = "Credential Access",
+    MitreTechnique = "T1110.001 - Password Guessing",
+    RecommendedAction = iff(
+        isnotempty(SuccessTime),
+        "IMMEDIATE: Reset password, invalidate sessions, review activity",
+        "Investigate source IPs, consider blocking, alert user"
+    )
+| project
+    TimeGenerated,
+    UserPrincipalName,
+    FailedCount,
+    FailedIPs,
+    SuccessIP,
+    SuccessLocation,
+    BreachIndicator,
+    Severity,
+    MitreTactic,
+    MitreTechnique,
+    RecommendedAction
+| order by FailedCount desc

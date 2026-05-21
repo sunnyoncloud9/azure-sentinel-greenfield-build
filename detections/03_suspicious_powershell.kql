@@ -1,0 +1,88 @@
+// =============================================================================
+// Detection Rule: Suspicious PowerShell Execution
+// MITRE ATT&CK: T1059.001 - PowerShell
+// Severity: High
+// Author: Sunny Bhardwaj
+// =============================================================================
+//
+// Description:
+// Detects PowerShell execution with suspicious indicators including encoded
+// commands, download cradles, bypass flags, and known offensive frameworks.
+// PowerShell is one of the most abused tools in modern attacks.
+//
+// Logic:
+// - Inspects PowerShell command lines from Security Events
+// - Pattern matches against known malicious indicators
+// - Scores findings by number of suspicious patterns matched
+//
+// Tuning Notes:
+// - Whitelist known admin scripts and automation accounts
+// - Adjust SuspicionScore threshold based on environment baseline
+// - Consider AMSI bypass detection for advanced threats
+// =============================================================================
+
+let suspiciousPatterns = dynamic([
+    "-enc", "-encodedcommand", "-e ",
+    "-nop", "-noprofile",
+    "-w hidden", "-windowstyle hidden",
+    "-exec bypass", "-executionpolicy bypass",
+    "downloadstring", "downloadfile", "iex(",
+    "invoke-expression", "invoke-webrequest",
+    "system.net.webclient", "net.webclient",
+    "frombase64string", "convert::frombase64",
+    "reflection.assembly", "[reflection.assembly]",
+    "amsiutils", "amsi.dll",
+    "mimikatz", "invoke-mimikatz", "invoke-mimikittenz",
+    "powerview", "invoke-bloodhound",
+    "powersploit", "empire", "covenant"
+]);
+SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID == 4688
+| where Process has_any ("powershell.exe", "pwsh.exe", "powershell_ise.exe")
+| extend CommandLineLower = tolower(CommandLine)
+| extend MatchedPatterns = set_intersect(
+    suspiciousPatterns,
+    extract_all(@"([\w\-\.\(\)]+)", CommandLineLower)
+)
+| extend SuspicionScore = array_length(MatchedPatterns)
+| where SuspicionScore >= 2
+| extend
+    EncodedCommand = iff(CommandLineLower has_any("-enc", "-encodedcommand"), true, false),
+    DownloadCradle = iff(CommandLineLower has_any("downloadstring", "downloadfile", "webclient"), true, false),
+    ExecutionPolicyBypass = iff(CommandLineLower has_any("bypass", "unrestricted"), true, false),
+    HiddenWindow = iff(CommandLineLower has_any("-w hidden", "windowstyle hidden"), true, false),
+    OffensiveTool = iff(CommandLineLower has_any("mimikatz", "powersploit", "empire", "covenant", "bloodhound"), true, false)
+| extend
+    Severity = case(
+        OffensiveTool == true, "Critical",
+        SuspicionScore >= 4, "Critical",
+        SuspicionScore >= 3, "High",
+        "Medium"
+    ),
+    MitreTactic = "Execution",
+    MitreTechnique = "T1059.001 - PowerShell",
+    RecommendedAction = case(
+        OffensiveTool == true, "IMMEDIATE: Isolate host, collect forensics, alert IR team",
+        SuspicionScore >= 4, "Escalate to Tier-2: Investigate process tree and network connections",
+        "Review and validate with user/admin"
+    )
+| project
+    TimeGenerated,
+    Computer,
+    Account,
+    Process,
+    CommandLine,
+    SuspicionScore,
+    MatchedPatterns,
+    EncodedCommand,
+    DownloadCradle,
+    ExecutionPolicyBypass,
+    HiddenWindow,
+    OffensiveTool,
+    Severity,
+    MitreTactic,
+    MitreTechnique,
+    RecommendedAction,
+    ParentProcessName
+| order by SuspicionScore desc, TimeGenerated desc

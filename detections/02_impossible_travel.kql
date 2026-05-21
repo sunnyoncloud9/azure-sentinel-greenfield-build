@@ -1,0 +1,85 @@
+// =============================================================================
+// Detection Rule: Impossible Travel
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: High
+// Author: Sunny Bhardwaj
+// =============================================================================
+//
+// Description:
+// Detects sign-ins from geographically distant locations within a short
+// time window — physically impossible without compromised credentials,
+// VPN abuse, or token theft.
+//
+// Logic:
+// - Looks at successful sign-ins per user in last 24h
+// - Calculates time delta and approximate distance between consecutive logins
+// - Flags if velocity exceeds 500 mph (commercial flight speed)
+//
+// Tuning Notes:
+// - Exclude known VPN/proxy IPs to reduce false positives
+// - Consider device ID correlation (same device = lower confidence)
+// - Add Conditional Access policy bypass detection for higher fidelity
+// =============================================================================
+
+let lookback = 24h;
+let velocityThresholdMph = 500.0;
+let minTimeDeltaMinutes = 5;
+SigninLogs
+| where TimeGenerated > ago(lookback)
+| where ResultType == "0"
+| where isnotempty(LocationDetails)
+| extend
+    City = tostring(LocationDetails.city),
+    Country = tostring(LocationDetails.countryOrRegion),
+    Latitude = todouble(LocationDetails.geoCoordinates.latitude),
+    Longitude = todouble(LocationDetails.geoCoordinates.longitude)
+| where isnotempty(Latitude) and isnotempty(Longitude)
+| project
+    TimeGenerated,
+    UserPrincipalName,
+    IPAddress,
+    City,
+    Country,
+    Latitude,
+    Longitude,
+    AppDisplayName,
+    DeviceDetail
+| sort by UserPrincipalName asc, TimeGenerated asc
+| serialize
+| extend
+    PrevTime = prev(TimeGenerated, 1),
+    PrevUser = prev(UserPrincipalName, 1),
+    PrevIP = prev(IPAddress, 1),
+    PrevCity = prev(City, 1),
+    PrevCountry = prev(Country, 1),
+    PrevLat = prev(Latitude, 1),
+    PrevLon = prev(Longitude, 1)
+| where UserPrincipalName == PrevUser
+| where IPAddress != PrevIP
+| extend
+    TimeDeltaMinutes = datetime_diff('minute', TimeGenerated, PrevTime),
+    DistanceMiles = geo_distance_2points(Longitude, Latitude, PrevLon, PrevLat) / 1609.34
+| where TimeDeltaMinutes >= minTimeDeltaMinutes
+| extend VelocityMph = (DistanceMiles / TimeDeltaMinutes) * 60
+| where VelocityMph > velocityThresholdMph
+| extend
+    MitreTactic = "Initial Access",
+    MitreTechnique = "T1078.004 - Cloud Accounts",
+    Severity = "High",
+    RecommendedAction = "Verify user travel, check for token theft, review device sign-ins"
+| project
+    TimeGenerated,
+    UserPrincipalName,
+    PrevTime,
+    Origin = strcat(PrevCity, ", ", PrevCountry),
+    Destination = strcat(City, ", ", Country),
+    PrevIP,
+    CurrentIP = IPAddress,
+    DistanceMiles = round(DistanceMiles, 2),
+    TimeDeltaMinutes,
+    VelocityMph = round(VelocityMph, 2),
+    MitreTactic,
+    MitreTechnique,
+    Severity,
+    RecommendedAction
+| order by VelocityMph desc

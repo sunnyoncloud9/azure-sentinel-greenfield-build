@@ -1,0 +1,101 @@
+// =============================================================================
+// Detection Rule: Anomalous Sign-In Patterns
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Medium-High
+// Author: Sunny Bhardwaj
+// =============================================================================
+//
+// Description:
+// Identifies anomalous sign-in behavior by comparing current activity to
+// each user's historical baseline. Detects:
+// - First-time country sign-ins
+// - First-time application access
+// - Sign-ins from anonymous IPs (Tor, known proxies)
+// - Sign-ins outside typical working hours
+//
+// Logic:
+// - Builds a 30-day baseline per user
+// - Compares last 24h activity against baseline
+// - Scores each anomaly and aggregates per sign-in event
+//
+// Tuning Notes:
+// - Adjust baseline period for high-turnover environments
+// - Add legitimate VPN ranges to whitelist
+// - Consider role-based normalization (executives travel more)
+// =============================================================================
+
+let baselineWindow = 30d;
+let detectionWindow = 24h;
+// Build per-user baselines
+let UserBaselines =
+    SigninLogs
+    | where TimeGenerated between (ago(baselineWindow) .. ago(detectionWindow))
+    | where ResultType == "0"
+    | summarize
+        KnownCountries = make_set(tostring(LocationDetails.countryOrRegion), 50),
+        KnownApps = make_set(AppDisplayName, 50),
+        KnownDevices = make_set(tostring(DeviceDetail.deviceId), 50),
+        TypicalHourMin = percentile(hourofday(TimeGenerated), 5),
+        TypicalHourMax = percentile(hourofday(TimeGenerated), 95),
+        SignInCount = count()
+        by UserPrincipalName
+    | where SignInCount >= 10;  // Require enough baseline data
+// Examine recent sign-ins
+SigninLogs
+| where TimeGenerated > ago(detectionWindow)
+| where ResultType == "0"
+| extend
+    SignInCountry = tostring(LocationDetails.countryOrRegion),
+    SignInCity = tostring(LocationDetails.city),
+    SignInHour = hourofday(TimeGenerated),
+    DeviceId = tostring(DeviceDetail.deviceId),
+    RiskState = tostring(RiskState),
+    RiskLevel = tostring(RiskLevelDuringSignIn)
+| join kind=inner (UserBaselines) on UserPrincipalName
+| extend
+    NewCountry = iff(SignInCountry !in (KnownCountries), 1, 0),
+    NewApp = iff(AppDisplayName !in (KnownApps), 1, 0),
+    NewDevice = iff(DeviceId !in (KnownDevices) and isnotempty(DeviceId), 1, 0),
+    UnusualHour = iff(SignInHour < TypicalHourMin or SignInHour > TypicalHourMax, 1, 0),
+    AnonymousIP = iff(RiskEventTypes_V2 has_any ("anonymizedIPAddress", "tor"), 1, 0),
+    RiskFlagged = iff(RiskLevel in ("high", "medium"), 1, 0)
+| extend AnomalyScore = NewCountry + NewApp + NewDevice + UnusualHour + AnonymousIP + RiskFlagged
+| where AnomalyScore >= 2
+| extend
+    Severity = case(
+        AnonymousIP == 1, "High",
+        AnomalyScore >= 4, "High",
+        AnomalyScore >= 3, "Medium",
+        "Low"
+    ),
+    AnomalyReasons = strcat_array(
+        pack_array(
+            iff(NewCountry == 1, "First-time country", ""),
+            iff(NewApp == 1, "First-time app", ""),
+            iff(NewDevice == 1, "Unknown device", ""),
+            iff(UnusualHour == 1, "Unusual hour", ""),
+            iff(AnonymousIP == 1, "Anonymous IP (Tor/proxy)", ""),
+            iff(RiskFlagged == 1, "Risk-flagged by Azure AD", "")
+        ),
+        " | "
+    ),
+    MitreTactic = "Initial Access",
+    MitreTechnique = "T1078.004 - Cloud Accounts",
+    RecommendedAction = case(
+        AnonymousIP == 1, "URGENT: Verify with user, force MFA, review session",
+        AnomalyScore >= 4, "Investigate: Contact user, check device compliance",
+        "Monitor and correlate with other signals"
+    )
+| project
+    TimeGenerated,
+    UserPrincipalName,
+    IPAddress,
+    Location = strcat(SignInCity, ", ", SignInCountry),
+    AppDisplayName,
+    AnomalyScore,
+    AnomalyReasons,
+    Severity,
+    MitreTactic,
+    MitreTechnique,
+    RecommendedAction
+| order by AnomalyScore desc, TimeGenerated desc

@@ -1,0 +1,89 @@
+// =============================================================================
+// Custom Log Parser — Normalized Authentication Events
+// Author: Sunny Bhardwaj
+// =============================================================================
+//
+// Purpose:
+// Normalizes authentication events from multiple sources (Azure AD, Windows,
+// AWS, Okta) into a common schema for unified detection rules and reporting.
+//
+// Output Schema (Advanced Security Information Model - ASIM aligned):
+// - EventTime
+// - EventVendor
+// - EventProduct
+// - EventResult (Success/Failure)
+// - SrcIpAddr
+// - SrcGeoCountry
+// - TargetUserName
+// - TargetUserType
+// - LogonProtocol
+// - FailureReason
+//
+// Save as a function in Sentinel:
+// .create-or-alter function NormalizedAuthEvents() { ... }
+// =============================================================================
+
+let AzureADAuth =
+    SigninLogs
+    | extend
+        EventTime = TimeGenerated,
+        EventVendor = "Microsoft",
+        EventProduct = "Azure AD",
+        EventResult = iff(ResultType == "0", "Success", "Failure"),
+        SrcIpAddr = IPAddress,
+        SrcGeoCountry = tostring(LocationDetails.countryOrRegion),
+        TargetUserName = UserPrincipalName,
+        TargetUserType = "Cloud",
+        LogonProtocol = AppDisplayName,
+        FailureReason = ResultDescription
+    | project
+        EventTime, EventVendor, EventProduct, EventResult,
+        SrcIpAddr, SrcGeoCountry, TargetUserName, TargetUserType,
+        LogonProtocol, FailureReason;
+let WindowsAuth =
+    SecurityEvent
+    | where EventID in (4624, 4625)
+    | extend
+        EventTime = TimeGenerated,
+        EventVendor = "Microsoft",
+        EventProduct = "Windows",
+        EventResult = iff(EventID == 4624, "Success", "Failure"),
+        SrcIpAddr = IpAddress,
+        SrcGeoCountry = "Unknown",
+        TargetUserName = TargetUserName,
+        TargetUserType = case(
+            AccountType == "User", "User",
+            AccountType == "Computer", "Machine",
+            "Other"
+        ),
+        LogonProtocol = case(
+            LogonType == "2", "Interactive",
+            LogonType == "3", "Network",
+            LogonType == "10", "RemoteInteractive",
+            "Other"
+        ),
+        FailureReason = iff(EventID == 4625, tostring(SubStatus), "")
+    | project
+        EventTime, EventVendor, EventProduct, EventResult,
+        SrcIpAddr, SrcGeoCountry, TargetUserName, TargetUserType,
+        LogonProtocol, FailureReason;
+let AwsAuth =
+    AWSCloudTrail
+    | where EventName in ("ConsoleLogin", "AssumeRole", "GetSessionToken")
+    | extend
+        EventTime = TimeGenerated,
+        EventVendor = "AWS",
+        EventProduct = "CloudTrail",
+        EventResult = iff(ResponseElements has "Success", "Success", "Failure"),
+        SrcIpAddr = SourceIpAddress,
+        SrcGeoCountry = "Unknown",
+        TargetUserName = UserIdentityArn,
+        TargetUserType = UserIdentityType,
+        LogonProtocol = EventName,
+        FailureReason = tostring(ErrorMessage)
+    | project
+        EventTime, EventVendor, EventProduct, EventResult,
+        SrcIpAddr, SrcGeoCountry, TargetUserName, TargetUserType,
+        LogonProtocol, FailureReason;
+union AzureADAuth, WindowsAuth, AwsAuth
+| order by EventTime desc
