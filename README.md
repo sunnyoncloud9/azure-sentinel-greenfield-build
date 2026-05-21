@@ -211,3 +211,16 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 *Built to demonstrate enterprise-grade detection engineering and SIEM architecture. All detections are tested in a real Azure Sentinel environment.*
+
+---
+
+## 📸 Screenshots
+
+### Analytics Rules — 5 Custom Detection Rules Live
+![Analytics Rules](screenshots/analytics_rules.png)
+
+### MITRE ATT&CK Coverage Map
+![MITRE ATT&CK Coverage](screenshots/mitre_coverage.png)
+
+### Microsoft Defender Dashboard
+![Defender Dashboard](screenshots/defender_dashboard.png)
